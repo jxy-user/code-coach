@@ -1,0 +1,119 @@
+{
+  "name": "code-coach",
+  "displayName": "CodeCoach",
+  "description": "AI 编程教练：在 VS Code 里边学边练 Java 编程，自动评测 + AI 语义点评 + 进度记忆",
+  "version": "0.1.0",
+  "publisher": "codecoach",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Education"
+  ],
+  "keywords": [
+    "java",
+    "learn",
+    "coach",
+    "ai",
+    "tutorial",
+    "practice"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:codeCoach.mainView"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeCoach",
+          "title": "CodeCoach",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeCoach": [
+        {
+          "type": "webview",
+          "id": "codeCoach.mainView",
+          "name": "学习教练"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeCoach.openSettings",
+        "title": "CodeCoach: 打开设置"
+      },
+      {
+        "command": "codeCoach.setApiKey",
+        "title": "CodeCoach: 设置 API Key"
+      },
+      {
+        "command": "codeCoach.startLesson",
+        "title": "CodeCoach: 开始/继续学习"
+      }
+    ],
+    "configuration": {
+      "title": "CodeCoach",
+      "properties": {
+        "codeCoach.preset": {
+          "type": "string",
+          "default": "deepseek",
+          "enum": [
+            "deepseek",
+            "kimi",
+            "moonshot",
+            "qwen",
+            "glm",
+            "ollama",
+            "custom"
+          ],
+          "description": "AI 厂商预设（custom 为完全自定义）"
+        },
+        "codeCoach.baseURL": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI 兼容 API 的 baseURL（留空则使用预设默认值）"
+        },
+        "codeCoach.model": {
+          "type": "string",
+          "default": "",
+          "description": "模型名（留空则使用预设默认值）"
+        },
+        "codeCoach.javaHome": {
+          "type": "string",
+          "default": "",
+          "description": "JDK 安装目录（留空则读取 JAVA_HOME 环境变量，再回退 PATH）"
+        },
+        "codeCoach.compileTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "description": "编译超时（毫秒）"
+        },
+        "codeCoach.runTimeoutMs": {
+          "type": "number",
+          "default": 3000,
+          "description": "每组测试用例运行超时（毫秒）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node esbuild.mjs --test && node --test dist-test/",
+    "package": "npm run build && vsce package",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.26.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.5.0"
+  }
+}
