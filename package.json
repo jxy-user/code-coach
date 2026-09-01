@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "codecoach",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jxy-user/code-coach.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -61,8 +65,9 @@
       "properties": {
         "codeCoach.preset": {
           "type": "string",
-          "default": "deepseek",
+          "default": "auto",
           "enum": [
+            "auto",
             "deepseek",
             "kimi",
             "moonshot",
@@ -71,7 +76,7 @@
             "ollama",
             "custom"
           ],
-          "description": "AI 厂商预设（custom 为完全自定义）"
+          "description": "AI 厂商预设（auto 根据 baseURL 自动检测厂商；custom 完全自定义）"
         },
         "codeCoach.baseURL": {
           "type": "string",

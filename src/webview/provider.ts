@@ -34,7 +34,9 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     // 后台预热 embedding（不阻塞激活），就绪后补齐向量
     void this.retriever
       .warmup(path.join(context.globalStorageUri.fsPath, 'models'))
-      .then(() => this.embedRagDocs());
+      .then(() => this.embedRagDocs())
+      .then(() => this.log('embedding warmup done'))
+      .catch((e) => this.log(`embedding warmup fail: ${e?.message ?? e}`));
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -62,6 +64,17 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     void this.view?.webview.postMessage(msg);
   }
 
+  /** 运行日志（写文件，便于无视觉环境下的端到端验证） */
+  private log(msg: string): void {
+    try {
+      const dir = this.context.globalStorageUri.fsPath;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, 'codecoach.log'), `[${new Date().toISOString()}] ${msg}\n`);
+    } catch {
+      /* 忽略 */
+    }
+  }
+
   private getHtml(webview: vscode.Webview): string {
     const mediaDir = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     const nonce = getNonce();
@@ -77,6 +90,7 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessage(msg: W2E): Promise<void> {
+    this.log(`msg:${msg.type}`);
     switch (msg.type) {
       case 'ready':
         await this.sendState();
@@ -128,6 +142,7 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     }
     this.currentExercise = exercise;
     this.progressStore.setCurrentExercise(exercise.id);
+    this.log(`startLesson ${exercise.id}`);
     this.post({ type: 'lessonContent', payload: { topic: exercise.topic, markdown: '', exercise } });
     const ragContext = await this.retrieveContext(`${exercise.topic} ${exercise.title}`, 'knowledge');
     const { system, user } = lessonPrompt(`${exercise.topic}——${exercise.title}`, ragContext);
@@ -175,6 +190,7 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const result = await evaluate(ex, source, this.evalOpts());
+    this.log(`runTest ${ex.id}: compile=${result.compile.ok} passed=${result.passed}/${result.total}`);
     this.post({ type: 'testResult', payload: result });
   }
 
@@ -190,6 +206,7 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const result = await evaluate(ex, source, this.evalOpts());
+    this.log(`submit ${ex.id}: compile=${result.compile.ok} passed=${result.passed}/${result.total}`);
     this.post({ type: 'testResult', payload: result });
 
     this.progressStore.record(ex.id, result.allPass);
@@ -273,7 +290,9 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       if (abort.signal.aborted) {
         this.post({ type: 'aiStreamDone', payload: { id, fullText: '' } });
       } else {
-        this.post({ type: 'error', payload: { message: err instanceof Error ? err.message : String(err), code: 'AI_ERROR' } });
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log(`stream ${id} error: ${msg}`);
+        this.post({ type: 'error', payload: { message: msg, code: 'AI_ERROR' } });
       }
     } finally {
       if (this.activeAbort === abort) this.activeAbort = undefined;

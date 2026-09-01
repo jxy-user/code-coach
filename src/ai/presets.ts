@@ -19,3 +19,14 @@ export const PRESETS: Preset[] = [
 export function getPreset(id: string): Preset {
   return PRESETS.find((p) => p.id === id) ?? PRESETS[0];
 }
+
+/** 根据用户提供的 baseURL 自动识别厂商（按最长前缀匹配） */
+export function detectPreset(baseURL: string): Preset | undefined {
+  if (!baseURL) return undefined;
+  const normalized = baseURL.trim().toLowerCase();
+  const candidates = PRESETS.filter((p) => p.baseURL).sort((a, b) => b.baseURL.length - a.baseURL.length);
+  for (const p of candidates) {
+    if (normalized.startsWith(p.baseURL.toLowerCase())) return p;
+  }
+  return undefined;
+}
