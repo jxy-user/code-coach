@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { E2W, W2E, StateSnapshot, ProgressState } from '../types';
-
-const VIEW_ID = 'codeCoach.mainView';
-const SECRET_KEY = 'codeCoach.apiKey';
+import { getAiConfig, getConfigSnapshot } from '../config';
+import { chatStream } from '../ai/client';
+import { lessonPrompt } from '../ai/prompts';
 
 /**
  * 侧栏 WebviewView 提供者。
@@ -12,6 +12,7 @@ const SECRET_KEY = 'codeCoach.apiKey';
 export class MainViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private messageDisposable?: vscode.Disposable;
+  private activeAbort?: AbortController;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -58,33 +59,78 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('workbench.action.openSettings', 'codeCoach');
         break;
       case 'startLesson':
+        await this.startLesson();
+        break;
+      case 'stopStream':
+        this.activeAbort?.abort();
+        break;
       case 'openExerciseFile':
       case 'runTest':
       case 'submit':
       case 'askHelp':
       case 'nextExercise':
-      case 'stopStream':
-        // 教学闭环在 Step 5 接入；此处先占位，保证消息链路可验证
+        // 评测/点评/编辑器联动在后续步骤接入
         this.post({ type: 'error', payload: { message: `「${msg.type}」将在后续步骤接入`, code: 'NOT_IMPLEMENTED' } });
         break;
       case 'getProgress':
         await this.sendState();
         break;
       default:
-        this.post({ type: 'error', payload: { message: `未知命令`, code: 'UNKNOWN' } });
+        this.post({ type: 'error', payload: { message: '未知命令', code: 'UNKNOWN' } });
+    }
+  }
+
+  /** AI 讲解知识点（流式）。Step 4/5 接入题库后改为当前练习主题。 */
+  private async startLesson(): Promise<void> {
+    const config = await getAiConfig(this.context);
+    if (!config.apiKey) {
+      this.post({
+        type: 'error',
+        payload: { message: '尚未配置 API Key。请执行命令「CodeCoach: 设置 API Key」或点「配置」。', code: 'NO_API_KEY' },
+      });
+      return;
+    }
+    const topic = 'Java 变量与数据类型';
+    this.post({ type: 'lessonContent', payload: { topic, markdown: '' } });
+    const { system, user } = lessonPrompt(topic);
+    await this.streamAi('lesson', config, system, user);
+  }
+
+  /** 通用流式调用：把 AI 输出按增量推给 webview */
+  private async streamAi(id: string, config: { baseURL: string; model: string; apiKey: string }, system: string, user: string): Promise<void> {
+    const abort = new AbortController();
+    this.activeAbort = abort;
+    try {
+      let full = '';
+      for await (const delta of chatStream(
+        config,
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        { signal: abort.signal },
+      )) {
+        full += delta;
+        this.post({ type: 'aiStream', payload: { id, delta } });
+      }
+      this.post({ type: 'aiStreamDone', payload: { id, fullText: full } });
+    } catch (err) {
+      if (abort.signal.aborted) {
+        this.post({ type: 'aiStreamDone', payload: { id, fullText: '' } });
+      } else {
+        this.post({ type: 'error', payload: { message: err instanceof Error ? err.message : String(err), code: 'AI_ERROR' } });
+      }
+    } finally {
+      if (this.activeAbort === abort) this.activeAbort = undefined;
     }
   }
 
   private async sendState(): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('codeCoach');
-    const preset = cfg.get<string>('preset', 'deepseek');
-    const model = cfg.get<string>('model', '') || preset;
-    const baseURL = cfg.get<string>('baseURL', '') || '';
-    const hasApiKey = !!(await this.context.secrets.get(SECRET_KEY));
+    const config = await getConfigSnapshot(this.context);
     const progress: ProgressState = { completed: {}, streak: 0, totalCompleted: 0 };
     const snapshot: StateSnapshot = {
       progress,
-      config: { hasApiKey, model, baseURL },
+      config,
       totalExercises: 0,
     };
     this.post({ type: 'state', payload: snapshot });

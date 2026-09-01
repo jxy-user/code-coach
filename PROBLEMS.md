@@ -12,4 +12,7 @@
 
 ## 实际遇到的问题
 
-（开发过程中逐条追加）
+| # | 现象 | 根因 | 解决方案 | 状态 |
+|---|---|---|---|---|
+| 1 | `node --test dist-test/` 报 `Cannot find module 'dist-test'` | Windows 下 node --test 对带尾斜杠的目录参数解析失败 | 改用 glob `node --test "dist-test/*.test.js"` | ✅ 已解决 |
+| 2 | tsc 报 `'data' is of type 'unknown'`（client.ts 的 res.json()） | fetch 的 json() 返回 unknown | 用 `as` 类型断言 | ✅ 已解决 |

@@ -105,7 +105,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node esbuild.mjs --test && node --test dist-test/",
+    "test": "node esbuild.mjs --test && node --test \"dist-test/*.test.js\"",
     "package": "npm run build && vsce package",
     "vscode:prepublish": "npm run build"
   },

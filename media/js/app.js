@@ -20,8 +20,10 @@ function handle(msg) {
       const { topic, exercise } = msg.payload;
       R.hideOnboarding();
       R.renderLesson(topic);
-      R.renderExercise(exercise);
-      R.renderHints(exercise.hints);
+      if (exercise) {
+        R.renderExercise(exercise);
+        R.renderHints(exercise.hints);
+      }
       R.showFooter();
       break;
     }

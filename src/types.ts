@@ -4,6 +4,12 @@
  * 前端侧对应字符串常量见 media/js/protocol.js。
  */
 
+export interface AiConfig {
+  baseURL: string;
+  model: string;
+  apiKey: string;
+}
+
 export type Difficulty = 'easy' | 'medium' | 'hard';
 
 export interface TestCase {
@@ -88,7 +94,7 @@ export type W2E =
 // ---- 消息协议：扩展 → webview（事件） ----
 export type E2W =
   | { type: 'state'; payload: StateSnapshot }
-  | { type: 'lessonContent'; payload: { topic: string; markdown: string; exercise: Exercise } }
+  | { type: 'lessonContent'; payload: { topic: string; markdown: string; exercise?: Exercise } }
   | { type: 'aiStream'; payload: { id: string; delta: string } }
   | { type: 'aiStreamDone'; payload: { id: string; fullText: string } }
   | { type: 'testResult'; payload: TestResult }
