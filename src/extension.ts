@@ -24,6 +24,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('CodeCoach：API Key 已安全保存');
       }
     }),
+    vscode.workspace.onDidSaveTextDocument((doc) => provider.onDidSaveDocument(doc)),
   );
 }
 

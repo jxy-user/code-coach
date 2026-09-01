@@ -1,20 +1,27 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import { E2W, W2E, StateSnapshot, ProgressState } from '../types';
-import { getAiConfig, getConfigSnapshot } from '../config';
+import { E2W, W2E, StateSnapshot, Exercise, TestResult, AiConfig } from '../types';
+import { getAiConfig, getConfigSnapshot, getJavaHome, getTimeouts } from '../config';
 import { chatStream } from '../ai/client';
-import { lessonPrompt } from '../ai/prompts';
+import { lessonPrompt, instantFeedbackPrompt, fullFeedbackPrompt, helpPrompt } from '../ai/prompts';
+import { evaluate } from '../judge/evaluator';
+import { loadExercises, getExercise, exerciseCount } from '../bank/loader';
+import { ProgressStore } from '../progress/store';
 
 /**
- * 侧栏 WebviewView 提供者。
- * 职责：渲染三段式 UI、建立消息通道、把命令路由到各业务模块（AI/评测/RAG/进度）。
+ * 侧栏 WebviewView 提供者：消息路由 + 教学闭环编排。
  */
 export class MainViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private messageDisposable?: vscode.Disposable;
   private activeAbort?: AbortController;
+  private currentExercise?: Exercise;
+  private instantTimer?: NodeJS.Timeout;
+  private progressStore: ProgressStore;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.progressStore = new ProgressStore(context);
+  }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -23,19 +30,24 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
     };
     webviewView.webview.html = this.getHtml(webviewView.webview);
-    // 先注销旧监听器，避免视图在侧栏/面板间拖动重建时重复注册
     this.messageDisposable?.dispose();
     this.messageDisposable = webviewView.webview.onDidReceiveMessage((msg: W2E) => {
       void this.handleMessage(msg);
     });
   }
 
-  /** 向 webview 推送事件 */
+  /** 保存 Java 文件时触发轻量点评（debounce，由 extension 的 onDidSaveTextDocument 调用） */
+  onDidSaveDocument(doc: vscode.TextDocument): void {
+    if (!this.currentExercise) return;
+    if (!doc.fileName.endsWith('Main.java')) return;
+    if (this.instantTimer) clearTimeout(this.instantTimer);
+    this.instantTimer = setTimeout(() => void this.instantFeedback(doc.getText()), 1200);
+  }
+
   private post(msg: E2W): void {
     void this.view?.webview.postMessage(msg);
   }
 
-  /** 组装 HTML：注入 CSP nonce 与资源 URI */
   private getHtml(webview: vscode.Webview): string {
     const mediaDir = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     const nonce = getNonce();
@@ -59,18 +71,25 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('workbench.action.openSettings', 'codeCoach');
         break;
       case 'startLesson':
-        await this.startLesson();
+        await this.startLesson(msg.payload?.exerciseId);
+        break;
+      case 'openExerciseFile':
+        await this.openExerciseFile();
+        break;
+      case 'runTest':
+        await this.runTest();
+        break;
+      case 'submit':
+        await this.submit();
+        break;
+      case 'askHelp':
+        await this.askHelp(msg.payload.question);
+        break;
+      case 'nextExercise':
+        await this.nextExercise();
         break;
       case 'stopStream':
         this.activeAbort?.abort();
-        break;
-      case 'openExerciseFile':
-      case 'runTest':
-      case 'submit':
-      case 'askHelp':
-      case 'nextExercise':
-        // 评测/点评/编辑器联动在后续步骤接入
-        this.post({ type: 'error', payload: { message: `「${msg.type}」将在后续步骤接入`, code: 'NOT_IMPLEMENTED' } });
         break;
       case 'getProgress':
         await this.sendState();
@@ -80,24 +99,144 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** AI 讲解知识点（流式）。Step 4/5 接入题库后改为当前练习主题。 */
-  private async startLesson(): Promise<void> {
+  // ---------- 教学闭环 ----------
+
+  private async startLesson(exerciseId?: string): Promise<void> {
     const config = await getAiConfig(this.context);
     if (!config.apiKey) {
-      this.post({
-        type: 'error',
-        payload: { message: '尚未配置 API Key。请执行命令「CodeCoach: 设置 API Key」或点「配置」。', code: 'NO_API_KEY' },
-      });
+      this.post({ type: 'error', payload: { message: '尚未配置 API Key。请执行命令「CodeCoach: 设置 API Key」或点「配置」。', code: 'NO_API_KEY' } });
       return;
     }
-    const topic = 'Java 变量与数据类型';
-    this.post({ type: 'lessonContent', payload: { topic, markdown: '' } });
-    const { system, user } = lessonPrompt(topic);
+    const exercise = exerciseId ? getExercise(exerciseId) : this.nextTodoExercise();
+    if (!exercise) {
+      this.post({ type: 'error', payload: { message: '题库为空', code: 'NO_EXERCISE' } });
+      return;
+    }
+    this.currentExercise = exercise;
+    this.progressStore.setCurrentExercise(exercise.id);
+    this.post({ type: 'lessonContent', payload: { topic: exercise.topic, markdown: '', exercise } });
+    const { system, user } = lessonPrompt(`${exercise.topic}——${exercise.title}`);
     await this.streamAi('lesson', config, system, user);
   }
 
-  /** 通用流式调用：把 AI 输出按增量推给 webview */
-  private async streamAi(id: string, config: { baseURL: string; model: string; apiKey: string }, system: string, user: string): Promise<void> {
+  private nextTodoExercise(): Exercise | undefined {
+    const progress = this.progressStore.get();
+    return loadExercises().find((e) => !progress.completed[e.id]?.passed) ?? loadExercises()[0];
+  }
+
+  private async nextExercise(): Promise<void> {
+    const exercises = loadExercises();
+    const idx = this.currentExercise ? exercises.findIndex((e) => e.id === this.currentExercise!.id) : -1;
+    const next = exercises[idx + 1] ?? exercises[0];
+    await this.startLesson(next.id);
+  }
+
+  private getActiveSource(): string | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return undefined;
+    if (!editor.document.fileName.endsWith('.java')) return undefined;
+    return editor.document.getText();
+  }
+
+  private evalOpts() {
+    const t = getTimeouts();
+    return {
+      javaHome: getJavaHome(),
+      runDir: this.context.globalStorageUri.fsPath,
+      compileTimeoutMs: t.compileTimeoutMs,
+      runTimeoutMs: t.runTimeoutMs,
+    };
+  }
+
+  private async runTest(): Promise<void> {
+    const ex = this.currentExercise;
+    if (!ex) {
+      this.post({ type: 'error', payload: { message: '请先点「开始学习」选择一道题', code: 'NO_EXERCISE' } });
+      return;
+    }
+    const source = this.getActiveSource();
+    if (source === undefined) {
+      this.post({ type: 'error', payload: { message: '请打开 Main.java（点「打开练习文件」）', code: 'NO_SOURCE' } });
+      return;
+    }
+    const result = await evaluate(ex, source, this.evalOpts());
+    this.post({ type: 'testResult', payload: result });
+  }
+
+  private async submit(): Promise<void> {
+    const ex = this.currentExercise;
+    if (!ex) {
+      this.post({ type: 'error', payload: { message: '请先点「开始学习」选择一道题', code: 'NO_EXERCISE' } });
+      return;
+    }
+    const source = this.getActiveSource();
+    if (source === undefined) {
+      this.post({ type: 'error', payload: { message: '请打开 Main.java（点「打开练习文件」）', code: 'NO_SOURCE' } });
+      return;
+    }
+    const result = await evaluate(ex, source, this.evalOpts());
+    this.post({ type: 'testResult', payload: result });
+
+    this.progressStore.record(ex.id, result.allPass);
+    this.post({ type: 'progressUpdate', payload: this.progressStore.get() });
+
+    const config = await getAiConfig(this.context);
+    if (!config.apiKey) return;
+    const { system, user } = fullFeedbackPrompt(ex.title, source, this.summarizeTestResult(result));
+    await this.streamAi('feedback', config, system, user);
+  }
+
+  private async askHelp(question: string): Promise<void> {
+    const config = await getAiConfig(this.context);
+    if (!config.apiKey) {
+      this.post({ type: 'error', payload: { message: '尚未配置 API Key', code: 'NO_API_KEY' } });
+      return;
+    }
+    const source = this.getActiveSource() ?? '';
+    const { system, user } = helpPrompt(this.currentExercise?.title ?? '当前练习', source, question);
+    await this.streamAi('help', config, system, user);
+  }
+
+  private async instantFeedback(source: string): Promise<void> {
+    if (this.activeAbort) return; // 已有流在跑，跳过轻量点评避免打断
+    const config = await getAiConfig(this.context);
+    if (!config.apiKey) return;
+    const { system, user } = instantFeedbackPrompt(this.currentExercise?.title ?? '', source);
+    await this.streamAi('instant', config, system, user);
+  }
+
+  private async openExerciseFile(): Promise<void> {
+    const ex = this.currentExercise;
+    if (!ex) {
+      this.post({ type: 'error', payload: { message: '请先点「开始学习」选择一道题', code: 'NO_EXERCISE' } });
+      return;
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      this.post({ type: 'error', payload: { message: '请先打开一个文件夹作为工作区', code: 'NO_FOLDER' } });
+      return;
+    }
+    const uri = vscode.Uri.joinPath(folder.uri, 'Main.java');
+    try {
+      await vscode.workspace.fs.stat(uri);
+    } catch {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(ex.starterCode, 'utf8'));
+    }
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(doc, { preview: false });
+    const text = doc.getText();
+    const idx = text.indexOf('TODO');
+    if (idx >= 0) {
+      const line = doc.lineAt(doc.positionAt(idx).line);
+      editor.selection = new vscode.Selection(line.range.start, line.range.end);
+      editor.revealRange(line.range, vscode.TextEditorRevealType.InCenter);
+    }
+  }
+
+  // ---------- 通用流式 + 状态 ----------
+
+  private async streamAi(id: string, config: AiConfig, system: string, user: string): Promise<void> {
+    this.activeAbort?.abort();
     const abort = new AbortController();
     this.activeAbort = abort;
     try {
@@ -125,13 +264,23 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private summarizeTestResult(r: TestResult): string {
+    if (!r.compile.ok) return `编译失败：${r.compile.errors.join('; ')}`;
+    const parts = r.cases.map((c) => {
+      const label = { pass: '通过', fail: '失败', runtimeError: '异常', timeout: '超时', oom: '内存溢出' }[c.status];
+      return `#${c.index + 1} ${label}${c.error ? '（' + c.error + '）' : ''}`;
+    });
+    return `通过 ${r.passed}/${r.total}。${parts.join('；')}`;
+  }
+
   private async sendState(): Promise<void> {
     const config = await getConfigSnapshot(this.context);
-    const progress: ProgressState = { completed: {}, streak: 0, totalCompleted: 0 };
+    const progress = this.progressStore.get();
     const snapshot: StateSnapshot = {
       progress,
       config,
-      totalExercises: 0,
+      currentExerciseId: this.currentExercise?.id ?? progress.currentExerciseId,
+      totalExercises: exerciseCount(),
     };
     this.post({ type: 'state', payload: snapshot });
   }
