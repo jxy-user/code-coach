@@ -5,6 +5,7 @@ import * as stream from './stream.js';
 
 const vscode = acquireVsCodeApi();
 let lastTestResult = null;
+let state = null;
 
 function post(type, payload) {
   vscode.postMessage(payload === undefined ? { type } : { type, payload });
@@ -13,6 +14,7 @@ function post(type, payload) {
 function handle(msg) {
   switch (msg.type) {
     case MSG.STATE:
+      state = msg.payload;
       R.renderProgress(msg.payload.progress, msg.payload.totalExercises);
       R.renderConfigHint(msg.payload.config);
       break;
@@ -41,7 +43,7 @@ function handle(msg) {
       R.renderFeedback(msg.payload.markdown);
       break;
     case MSG.PROGRESS_UPDATE:
-      R.renderProgress(msg.payload, msg.payload ? (msg.payload.totalExercises ?? 0) : 0);
+      R.renderProgress(msg.payload, state?.totalExercises ?? 0);
       break;
     case MSG.CONFIG_CHANGED:
       R.renderConfigHint(msg.payload);

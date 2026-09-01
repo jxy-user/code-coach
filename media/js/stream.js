@@ -9,6 +9,9 @@ export function appendDelta(id, delta) {
   streams.set(id, s);
   const el = ensureStreamContainer(id);
   if (el) el.innerHTML = renderMarkdown(s.text);
+  // 流式增长时自动滚动到底部，保证用户看到最新输出
+  const content = document.getElementById('content');
+  if (content) content.scrollTop = content.scrollHeight;
 }
 
 export function endStream(id) {
