@@ -7,6 +7,11 @@ import { lessonPrompt, instantFeedbackPrompt, fullFeedbackPrompt, helpPrompt } f
 import { evaluate } from '../judge/evaluator';
 import { loadExercises, getExercise, exerciseCount } from '../bank/loader';
 import { ProgressStore } from '../progress/store';
+import * as path from 'path';
+import { VectorStore } from '../rag/vectorStore';
+import { Retriever } from '../rag/retriever';
+import { buildDocs } from '../rag/indexer';
+import { embed } from '../rag/embedder';
 
 /**
  * 侧栏 WebviewView 提供者：消息路由 + 教学闭环编排。
@@ -18,9 +23,18 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
   private currentExercise?: Exercise;
   private instantTimer?: NodeJS.Timeout;
   private progressStore: ProgressStore;
+  private ragStore: VectorStore;
+  private retriever: Retriever;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.progressStore = new ProgressStore(context);
+    this.ragStore = new VectorStore(path.join(context.globalStorageUri.fsPath, 'rag-index.json'));
+    this.retriever = new Retriever(this.ragStore);
+    this.syncRagIndex();
+    // 后台预热 embedding（不阻塞激活），就绪后补齐向量
+    void this.retriever
+      .warmup(path.join(context.globalStorageUri.fsPath, 'models'))
+      .then(() => this.embedRagDocs());
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -115,7 +129,8 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     this.currentExercise = exercise;
     this.progressStore.setCurrentExercise(exercise.id);
     this.post({ type: 'lessonContent', payload: { topic: exercise.topic, markdown: '', exercise } });
-    const { system, user } = lessonPrompt(`${exercise.topic}——${exercise.title}`);
+    const ragContext = await this.retrieveContext(`${exercise.topic} ${exercise.title}`, 'knowledge');
+    const { system, user } = lessonPrompt(`${exercise.topic}——${exercise.title}`, ragContext);
     await this.streamAi('lesson', config, system, user);
   }
 
@@ -182,7 +197,8 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
 
     const config = await getAiConfig(this.context);
     if (!config.apiKey) return;
-    const { system, user } = fullFeedbackPrompt(ex.title, source, this.summarizeTestResult(result));
+    const ragContext = await this.retrieveContext(`${ex.topic} ${ex.title}`, 'mistakes');
+    const { system, user } = fullFeedbackPrompt(ex.title, source, this.summarizeTestResult(result), ragContext);
     await this.streamAi('feedback', config, system, user);
   }
 
@@ -271,6 +287,35 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       return `#${c.index + 1} ${label}${c.error ? '（' + c.error + '）' : ''}`;
     });
     return `通过 ${r.passed}/${r.total}。${parts.join('；')}`;
+  }
+
+  /** 构建 RAG 文档（先存文本，空向量；embedding 就绪后补齐） */
+  private syncRagIndex(): void {
+    const docs = buildDocs(loadExercises(), this.progressStore.get());
+    for (const d of docs) this.ragStore.upsert(d, []);
+    this.ragStore.persist();
+  }
+
+  private async embedRagDocs(): Promise<void> {
+    for (const doc of this.ragStore.getAllDocs()) {
+      try {
+        const vec = await embed(doc.text);
+        this.ragStore.upsert(doc, vec);
+      } catch {
+        break;
+      }
+    }
+    this.ragStore.persist();
+  }
+
+  private async retrieveContext(query: string, ns: string): Promise<string> {
+    try {
+      const results = await this.retriever.query(query, 5, ns);
+      if (results.length === 0) return '';
+      return results.map((r) => `- [${r.doc.ns}] ${r.doc.text}`).join('\n');
+    } catch {
+      return '';
+    }
   }
 
   private async sendState(): Promise<void> {
