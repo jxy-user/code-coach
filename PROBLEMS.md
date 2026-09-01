@@ -16,3 +16,4 @@
 |---|---|---|---|---|
 | 1 | `node --test dist-test/` 报 `Cannot find module 'dist-test'` | Windows 下 node --test 对带尾斜杠的目录参数解析失败 | 改用 glob `node --test "dist-test/*.test.js"` | ✅ 已解决 |
 | 2 | tsc 报 `'data' is of type 'unknown'`（client.ts 的 res.json()） | fetch 的 json() 返回 unknown | 用 `as` 类型断言 | ✅ 已解决 |
+| 3 | 评测中文 stdout 乱码（`你好` → `��ã`） | JDK 18+ (JEP 400)：`System.out` 编码由独立 `stdout.encoding` 决定（Windows 默认 GBK），`-Dfile.encoding=UTF-8` 不再生效 | 显式加 `-Dstdin.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8` | ✅ 已解决 |
